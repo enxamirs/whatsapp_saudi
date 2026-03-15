@@ -19,6 +19,11 @@ Type_pdf="application/pdf"
 
 
 def normalize_phone(number):
+    """Normalise a phone number to the format expected by the WhatsApp API.
+
+    Returns an empty string when the input is falsy or the result is not a
+    plausible international number (fewer than 7 digits after cleaning).
+    """
     phone_number = (number or "").replace("+", "").replace("-", "").replace(" ", "")
     if phone_number.startswith("00"):
         phone_number = phone_number[2:]
@@ -29,9 +34,13 @@ def normalize_phone(number):
             phone_number = "966" + phone_number
     if phone_number.startswith("0"):
         phone_number = phone_number[1:]
+    # Reject anything that doesn't look like a real number
+    if not phone_number or not phone_number.isdigit() or len(phone_number) < 7:
+        return ""
     return phone_number
 
 def normalize_phone_bavatel(number):
+    """Normalise a phone number for the Bevatel API (keeps leading +)."""
     phone_number = (number or "").replace("-", "").replace(" ", "")
     if phone_number.startswith("00"):
         phone_number = phone_number[2:]
@@ -42,6 +51,13 @@ def normalize_phone_bavatel(number):
             phone_number = "966" + phone_number
     if phone_number.startswith("0"):
         phone_number = phone_number[1:]
+    # Ensure leading + is present (Bevatel expects E.164 format)
+    if phone_number and not phone_number.startswith("+"):
+        phone_number = "+" + phone_number
+    # Basic sanity check
+    digits = phone_number.lstrip("+")
+    if not digits or not digits.isdigit() or len(digits) < 7:
+        return ""
     return phone_number
 
 def generate_pdf_base64_from_bytes(pdf_bytes: bytes) -> str:
@@ -110,13 +126,66 @@ def close_conversation(conversation_id):
         frappe.log_error(frappe.get_traceback(), ERROR_MESSAGE1)
 
 
+# Priority-ordered field names used for smart phone number detection
+_PHONE_FIELD_PRIORITY = [
+    "custom_whatsapp_number",
+    "custom_whatsapp_number_",
+    "whatsapp_number",
+    "mobile_no",
+    "phone",
+    "contact_mobile",
+]
+
+
+def _get_phone_from_doc(doc, preferred_field=None):
+    """Return the first non-empty phone value found in *doc*.
+
+    Tries *preferred_field* first (if provided), then falls back through
+    ``_PHONE_FIELD_PRIORITY``.  Returns ``None`` when nothing is found.
+    """
+    candidates = []
+    if preferred_field:
+        candidates.append(preferred_field)
+    for field in _PHONE_FIELD_PRIORITY:
+        if field not in candidates:
+            candidates.append(field)
+    for field in candidates:
+        value = doc.get(field)
+        if value and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _write_whatsapp_log(title, status, to_number, message="", document_type="",
+                        document_name="", error_message=""):
+    """Insert a *whatsapp saudi success log* entry with the enriched schema."""
+    try:
+        frappe.get_doc({
+            "doctype": "whatsapp saudi success log",
+            "title": title,
+            "status": status,
+            "document_type": document_type,
+            "document_name": document_name,
+            "to_number": to_number,
+            "message": message,
+            "error_message": error_message,
+            "time": now(),
+        }).insert(ignore_permissions=True)
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Failed to write WhatsApp log")
 
 
 class ERPGulfNotification(Notification):
 
 
     def get_receiver_list(self, doc, context):
-        """return receiver list based on the doc field and role specified"""
+        """Return a deduplicated list of valid phone numbers for this notification.
+
+        The method applies smart detection: when the configured field is empty it
+        falls back through a priority list of common phone fields
+        (custom_whatsapp_number, mobile_no, phone …).  ``None`` / empty values
+        and numbers that fail basic validation are silently skipped.
+        """
         receiver_list = []
         for recipient in self.recipients:
             if recipient.condition and not frappe.safe_eval(recipient.condition, None, context):
@@ -126,12 +195,31 @@ class ERPGulfNotification(Notification):
                 receiver_list += get_user_info([dict(user_name=doc.get("owner"))], "mobile_no")
 
             elif recipient.receiver_by_document_field:
-                receiver_list.append(doc.get(recipient.receiver_by_document_field))
+                # Try the configured field first, then fall back to known phone fields
+                raw = _get_phone_from_doc(doc, preferred_field=recipient.receiver_by_document_field)
+                if raw:
+                    receiver_list.append(raw)
+                else:
+                    frappe.log_error(
+                        title="WhatsApp Notification – phone not found",
+                        message=(
+                            f"DocType: {doc.doctype}, Doc: {doc.name}, "
+                            f"Field: {recipient.receiver_by_document_field} — "
+                            "no phone value found in document or fallback fields."
+                        ),
+                    )
 
             if recipient.receiver_by_role:
                 receiver_list += get_info_based_on_role(recipient.receiver_by_role, "mobile_no")
 
-        return receiver_list
+        # Remove None / empty / duplicate entries
+        seen = set()
+        cleaned = []
+        for item in receiver_list:
+            if item and str(item).strip() and item not in seen:
+                seen.add(item)
+                cleaned.append(item)
+        return cleaned
 
     def get_receiver_phone_number(self, number):
         return normalize_phone(number)
@@ -322,14 +410,14 @@ class ERPGulfNotification(Notification):
                 )
 
                 if conversation_id:
-                    frappe.get_doc({
-                        "doctype": "whatsapp saudi success log",
-                        "title": "Message successfully sent",
-                        "message": conversation_id,
-                        "to_number": phoneNumber,
-                        "time": now()
-                    }).insert(ignore_permissions=True)
-
+                    _write_whatsapp_log(
+                        title="Message successfully sent",
+                        status="Success",
+                        to_number=phoneNumber,
+                        message=conversation_id,
+                        document_type=doc.doctype,
+                        document_name=doc.name,
+                    )
 
                     try:
                         close_conversation(conversation_id)
@@ -422,14 +510,14 @@ class ERPGulfNotification(Notification):
                     conversation_id = response_dict.get("conversation_id") or response_dict.get("conversation", {}).get("id") or response_dict.get("data", {}).get("conversation_id")
 
                     if message_id and conversation_id:
-                        frappe.get_doc({
-                            "doctype": "whatsapp saudi success log",
-                            "title": "Message successfully sent",
-                            "message": message_id,
-                            "to_number": phone_number,
-                            "time": now()
-                        }).insert(ignore_permissions=True)
-
+                        _write_whatsapp_log(
+                            title="Message successfully sent",
+                            status="Success",
+                            to_number=phone_number,
+                            message=message_id,
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                        )
 
                         try:
                             close_conversation(conversation_id)
@@ -557,13 +645,14 @@ class ERPGulfNotification(Notification):
 
                     if response.status_code in [200, 201]:
 
-                        frappe.get_doc({
-                            "doctype": "whatsapp saudi success log",
-                            "title": "Message successfully sent",
-                            "message": json.dumps(response_data),
-                            "to_number": phone_number,
-                            "time": now()
-                        }).insert(ignore_permissions=True)
+                        _write_whatsapp_log(
+                            title="Message successfully sent",
+                            status="Success",
+                            to_number=phone_number,
+                            message=json.dumps(response_data),
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                        )
 
                         results.append({
                             "status": "success",
@@ -575,6 +664,15 @@ class ERPGulfNotification(Notification):
                         frappe.log_error(
                             title="Bevatel WhatsApp API Error",
                             message=json.dumps(response_data)
+                        )
+                        _write_whatsapp_log(
+                            title="Message failed",
+                            status="Failed",
+                            to_number=phone_number,
+                            message="",
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                            error_message=json.dumps(response_data),
                         )
 
                         results.append({
@@ -682,13 +780,14 @@ class ERPGulfNotification(Notification):
 
 
                     if response.status_code in [200, 201]:
-                        frappe.get_doc({
-                            "doctype": "whatsapp saudi success log",
-                            "title": "Message successfully sent",
-                            "message": json.dumps(response_data),
-                            "to_number": phone_number,
-                            "time": now()
-                        }).insert(ignore_permissions=True)
+                        _write_whatsapp_log(
+                            title="Message successfully sent",
+                            status="Success",
+                            to_number=phone_number,
+                            message=json.dumps(response_data),
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                        )
 
                         results.append({
                             "status": "success",
@@ -699,6 +798,15 @@ class ERPGulfNotification(Notification):
                         frappe.log_error(
                             title="Bevatel WhatsApp API Error",
                             message=json.dumps(response_data)
+                        )
+                        _write_whatsapp_log(
+                            title="Message failed",
+                            status="Failed",
+                            to_number=phone_number,
+                            message="",
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                            error_message=json.dumps(response_data),
                         )
 
                         results.append({
@@ -740,13 +848,21 @@ class ERPGulfNotification(Notification):
         memory_url = f"data:application/pdf;base64,{pdf_base64}"
         recipients = self.get_receiver_list(doc, context)
 
+        ws_doc = frappe.get_doc('Whatsapp Saudi')
+        url = ws_doc.get('file_url')
+        instance = ws_doc.get('instance_id')
+        token = ws_doc.get('token')
+        msg1 = frappe.render_template(self.message, context)
+
         for receipt in recipients:
             number = receipt
             phoneNumber = self.get_receiver_phone_number(number)
-            url = frappe.get_doc('Whatsapp Saudi').get('file_url')
-            instance = frappe.get_doc('Whatsapp Saudi').get('instance_id')
-            msg1 = frappe.render_template(self.message, context)
-            token = frappe.get_doc('Whatsapp Saudi').get('token')
+            if not phoneNumber:
+                frappe.log_error(
+                    title="WhatsApp Notification – invalid phone",
+                    message=f"DocType: {doc.doctype}, Doc: {doc.name}, raw number: {number!r}",
+                )
+                continue
             payload = {
                 'instanceid': instance,
                 'token': token,
@@ -763,32 +879,53 @@ class ERPGulfNotification(Notification):
                 if response.status_code == 200:
                     response_dict = json.loads(response_json)
                     if response_dict.get("sent") and response_dict.get("id"):
-                        frappe.get_doc({
-                            "doctype": "whatsapp saudi success log",
-                            "title": "Message successfully sent",
-                            "message": msg1,
-                            "to_number": phoneNumber,
-                            "time": now()
-                        }).insert()
+                        _write_whatsapp_log(
+                            title="Message successfully sent",
+                            status="Success",
+                            to_number=phoneNumber,
+                            message=msg1,
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                        )
                     else:
-                        # frappe.log_error("WhatsApp send failed", response_json)
                         frappe.log_error(
-                        title="API Error",
+                            title="WhatsApp PDF send failed",
+                            message=json.dumps({
+                                "doctype": doc.doctype,
+                                "document": doc.name,
+                                "phone": phoneNumber,
+                                "response": response_json,
+                            }, indent=2)
+                        )
+                        _write_whatsapp_log(
+                            title="Message failed",
+                            status="Failed",
+                            to_number=phoneNumber,
+                            message=msg1,
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                            error_message=response_json,
+                        )
+                else:
+                    frappe.log_error(
+                        title="WhatsApp API non-200 response",
                         message=json.dumps({
-                            "invoice": doc.name,
+                            "doctype": doc.doctype,
+                            "document": doc.name,
+                            "phone": phoneNumber,
+                            "status_code": response.status_code,
                             "response": response_json,
                         }, indent=2)
                     )
-
-                else:
-
-                    frappe.log_error(
-                    title="API Error",
-                    message=json.dumps({
-                        "invoice": doc.name,
-                        "response": response_json,
-                    }, indent=2)
-                )
+                    _write_whatsapp_log(
+                        title="Message failed",
+                        status="Failed",
+                        to_number=phoneNumber,
+                        message=msg1,
+                        document_type=doc.doctype,
+                        document_name=doc.name,
+                        error_message=f"HTTP {response.status_code}",
+                    )
 
                 return response
             except requests.exceptions.RequestException:
@@ -805,51 +942,100 @@ class ERPGulfNotification(Notification):
         for receipt in recipients:
             number = receipt
             phoneNumber = self.get_receiver_phone_number(number)
+            if not phoneNumber:
+                frappe.log_error(
+                    title="WhatsApp Notification – invalid phone",
+                    message=f"DocType: {doc.doctype}, Doc: {doc.name}, raw number: {number!r}",
+                )
+                results.append({"phone": number, "success": False, "error": "invalid phone number"})
+                continue
             querystring = {
                 "instanceid": instance,
                 "token": token,
                 "phone": phoneNumber,
                 "body": msg1
             }
+            response_json = None
             try:
                 response = requests.get(url, params=querystring)
                 response_json = response.text
                 if response.status_code == 200:
                     response_dict = json.loads(response_json)
                     if response_dict.get("sent") and response_dict.get("id"):
-                        current_time = now()
-                        frappe.get_doc({
-                            "doctype": "whatsapp saudi success log",
-                            "title": "Message successfully sent",
-                            "message": msg1,
-                            "to_number": phoneNumber,
-                            "time": current_time
-                        }).insert()
+                        _write_whatsapp_log(
+                            title="Message successfully sent",
+                            status="Success",
+                            to_number=phoneNumber,
+                            message=msg1,
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                        )
                         results.append({"phone": phoneNumber, "success": True})
                     else:
-                        # frappe.log_error(ERROR_MESSAGE, frappe.get_traceback())
+                        err = response_dict.get("error") or response_dict.get("message") or response_json
                         frappe.log_error(
-                            title="Failed to send notification",
+                            title="WhatsApp send failed",
                             message=json.dumps({
-                                "invoice": doc.name,
+                                "doctype": doc.doctype,
+                                "document": doc.name,
+                                "phone": phoneNumber,
                                 "response": response_json,
                             }, indent=2)
                         )
+                        _write_whatsapp_log(
+                            title="Message failed",
+                            status="Failed",
+                            to_number=phoneNumber,
+                            message=msg1,
+                            document_type=doc.doctype,
+                            document_name=doc.name,
+                            error_message=str(err),
+                        )
                         results.append({"phone": phoneNumber, "success": False, "raw": response_json})
                 else:
-                    frappe.log_error("status code is not 200", frappe.get_traceback())
+                    frappe.log_error(
+                        title="WhatsApp API non-200 response",
+                        message=json.dumps({
+                            "doctype": doc.doctype,
+                            "document": doc.name,
+                            "phone": phoneNumber,
+                            "status_code": response.status_code,
+                            "response": response_json,
+                        }, indent=2)
+                    )
+                    _write_whatsapp_log(
+                        title="Message failed",
+                        status="Failed",
+                        to_number=phoneNumber,
+                        message=msg1,
+                        document_type=doc.doctype,
+                        document_name=doc.name,
+                        error_message=f"HTTP {response.status_code}",
+                    )
                     results.append({"phone": phoneNumber, "success": False, "status_code": response.status_code})
-            except requests.exceptions.RequestException:
-
+            except requests.exceptions.RequestException as exc:
                 frappe.log_error(
-                    title="Failed to send notification",
+                    title="WhatsApp request exception",
                     message=json.dumps({
-                        "invoice": doc.name,
+                        "doctype": doc.doctype,
+                        "document": doc.name,
+                        "phone": phoneNumber,
                         "response": response_json,
+                        "error": str(exc),
                     }, indent=2)
+                )
+                _write_whatsapp_log(
+                    title="Message failed",
+                    status="Failed",
+                    to_number=phoneNumber,
+                    message=msg1,
+                    document_type=doc.doctype,
+                    document_name=doc.name,
+                    error_message=str(exc),
                 )
                 results.append({"phone": phoneNumber, "success": False, "error": "request exception"})
         return results
+
 
     # ---------- Main send dispatcher ----------
     def send(self, doc):
@@ -861,10 +1047,6 @@ class ERPGulfNotification(Notification):
             self.load_standard_properties(context)
 
         if self.channel == "Whatsapp Saudi":
-            frappe.log_error(
-            title="DEBUG STEP 3 - Channel Matched",
-            message="Inside Whatsapp Saudi channel"
-            )
             try:
                 if self.attach_print and self.print_format:
                     if rasayel_api == "Rasayel":
