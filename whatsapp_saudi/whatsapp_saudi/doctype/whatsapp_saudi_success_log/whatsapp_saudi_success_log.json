@@ -8,15 +8,35 @@
  "engine": "InnoDB",
  "field_order": [
   "title",
-  "message",
+  "status",
+  "document_type",
+  "document_name",
   "to_number",
-  "time"
+  "message",
+  "time",
+  "error_message"
  ],
  "fields": [
   {
    "fieldname": "title",
    "fieldtype": "Data",
    "label": "Title"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "\nSuccess\nFailed"
+  },
+  {
+   "fieldname": "document_type",
+   "fieldtype": "Data",
+   "label": "Document Type"
+  },
+  {
+   "fieldname": "document_name",
+   "fieldtype": "Data",
+   "label": "Document Name"
   },
   {
    "fieldname": "message",
@@ -32,11 +52,16 @@
    "fieldname": "time",
    "fieldtype": "Datetime",
    "label": "Time"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2023-11-07 11:03:29.385778",
+ "modified": "2025-03-15 13:00:00.000000",
  "modified_by": "Administrator",
  "module": "Whatsapp Saudi",
  "name": "whatsapp saudi success log",

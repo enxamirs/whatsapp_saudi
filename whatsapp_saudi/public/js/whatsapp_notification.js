@@ -74,7 +74,12 @@ frappe.notification = {
 				});
 			} else if (in_list(["WhatsApp", "SMS", "Whatsapp Saudi"], frm.doc.channel)) {
 				receiver_fields = $.map(fields, function (d) {
-					return d.options == "Phone" ? get_select_options(d) : null;
+					// Include Phone-option fields and Data fields that may store phone numbers
+					return (d.options == "Phone" || (d.fieldtype == "Data" && (
+						(d.fieldname || "").toLowerCase().indexOf("phone") !== -1 ||
+						(d.fieldname || "").toLowerCase().indexOf("mobile") !== -1 ||
+						(d.fieldname || "").toLowerCase().indexOf("whatsapp") !== -1
+					))) ? get_select_options(d) : null;
 				});
 			}
 
@@ -194,7 +199,15 @@ frappe.ui.form.on("Notification", {
 		frm.toggle_reqd("recipients", frm.doc.channel == "Email"|| frm.doc.channel == "Whatsapp Saudi");
 		frappe.notification.setup_fieldname_select(frm);
 		frappe.notification.setup_example_message(frm);
-		if (frm.doc.channel === "SMS" && frm.doc.__islocal) {
+		if (frm.doc.channel === "Whatsapp Saudi") {
+			frm.set_df_property(
+				"channel",
+				"description",
+				`<span class="phone-format-hint">` +
+				__("Phone numbers must include country code. Example: +966XXXXXXXXX or +201XXXXXXXXX") +
+				`</span>`
+			);
+		} else if (frm.doc.channel === "SMS" && frm.doc.__islocal) {
 			frm.set_df_property(
 				"channel",
 				"description",
