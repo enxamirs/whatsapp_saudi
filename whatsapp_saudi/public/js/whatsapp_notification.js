@@ -135,6 +135,20 @@ Last comment: {{ comments[-1].comment }} by {{ comments[-1].by }}
 			frm.set_df_property("message_examples", "options", template);
 		}
 	},
+	setup_attach_print_hint: function (frm) {
+		// Show or hide the PDF hint based on channel and attach_print
+		let wrapper = frm.fields_dict.attach_print && frm.fields_dict.attach_print.$wrapper;
+		if (!wrapper) return;
+		// Remove any existing hint first
+		wrapper.find(".whatsapp-print-helper").remove();
+		if (frm.doc.channel === "Whatsapp Saudi" && frm.doc.attach_print) {
+			wrapper.append(
+				`<div class="whatsapp-print-helper" style="background:#f0fdf4;border-left:4px solid #16a34a;padding:8px;font-size:13px;margin-top:4px;">
+					${__("This Print Format will be converted to PDF and sent with the WhatsApp message.")}
+				</div>`
+			);
+		}
+	},
 };
 
 frappe.ui.form.on("Notification", {
@@ -157,6 +171,7 @@ frappe.ui.form.on("Notification", {
 	refresh: function (frm) {
 		frappe.notification.setup_fieldname_select(frm);
 		frappe.notification.setup_example_message(frm);
+		frappe.notification.setup_attach_print_hint(frm);
 
 		frm.add_fetch("sender", "email_id", "sender_email");
 		frm.set_query("sender", () => {
@@ -175,6 +190,9 @@ frappe.ui.form.on("Notification", {
 	view_properties: function (frm) {
 		frappe.route_options = { doc_type: frm.doc.document_type };
 		frappe.set_route("Form", "Customize Form");
+	},
+	attach_print: function (frm) {
+		frappe.notification.setup_attach_print_hint(frm);
 	},
 	event: function (frm) {
 		if (in_list(["Days Before", "Days After"], frm.doc.event)) {
@@ -216,5 +234,6 @@ frappe.ui.form.on("Notification", {
 		} else {
 			frm.set_df_property("channel", "description", ` `);
 		}
+		frappe.notification.setup_attach_print_hint(frm);
 	},
 });

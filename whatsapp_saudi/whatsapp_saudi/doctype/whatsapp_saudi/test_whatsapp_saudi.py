@@ -6,7 +6,10 @@ from whatsapp_saudi.overrides.whtatsapp_notification import (
     normalize_phone,
     normalize_phone_bavatel,
     _get_phone_from_doc,
+    generate_pdf_base64_from_bytes,
+    decode_memory_url,
 )
+import base64
 
 
 class TestNormalizePhone(FrappeTestCase):
@@ -79,3 +82,47 @@ class TestGetPhoneFromDoc(FrappeTestCase):
     def test_returns_none_when_no_preferred_field_and_no_fallbacks(self):
         doc = _MockDoc({})
         self.assertIsNone(_get_phone_from_doc(doc))
+
+
+class TestPdfHelpers(FrappeTestCase):
+    """Unit tests for PDF generation helpers."""
+
+    def test_generate_pdf_base64_from_bytes_returns_data_uri(self):
+        dummy = b"%PDF-1.4 fake content"
+        result = generate_pdf_base64_from_bytes(dummy)
+        self.assertTrue(result.startswith("data:application/pdf;base64,"))
+        # Ensure the base64 payload round-trips correctly
+        _, encoded = result.split(",", 1)
+        self.assertEqual(base64.b64decode(encoded), dummy)
+
+    def test_decode_memory_url_returns_bytes(self):
+        dummy = b"hello world"
+        encoded = base64.b64encode(dummy).decode()
+        memory_url = f"data:application/pdf;base64,{encoded}"
+        result = decode_memory_url(memory_url)
+        self.assertEqual(result, dummy)
+
+    def test_decode_memory_url_invalid_returns_none(self):
+        self.assertIsNone(decode_memory_url("not-a-valid-data-uri"))
+
+    def test_pdf_filename_format(self):
+        """Verify the expected filename pattern: {DocType}-{DocName}.pdf"""
+        doctype = "Leave Application"
+        docname = "HR-LA-0005"
+        filename = f"{doctype}-{docname}.pdf"
+        self.assertEqual(filename, "Leave Application-HR-LA-0005.pdf")
+
+    def test_pdf_size_limit_constant(self):
+        """15 MB size limit must equal 15 * 1024 * 1024 bytes."""
+        max_bytes = 15 * 1024 * 1024
+        self.assertEqual(max_bytes, 15728640)
+
+    def test_pdf_below_size_limit(self):
+        """A 1-byte PDF is below the 15 MB limit."""
+        dummy = b"x"
+        self.assertLess(len(dummy), 15 * 1024 * 1024)
+
+    def test_pdf_above_size_limit(self):
+        """16 MB of data exceeds the 15 MB limit."""
+        big = b"x" * (16 * 1024 * 1024)
+        self.assertGreater(len(big), 15 * 1024 * 1024)

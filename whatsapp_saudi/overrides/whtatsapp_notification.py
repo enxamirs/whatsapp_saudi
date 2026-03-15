@@ -157,7 +157,7 @@ def _get_phone_from_doc(doc, preferred_field=None):
 
 
 def _write_whatsapp_log(title, status, to_number, message="", document_type="",
-                        document_name="", error_message=""):
+                        document_name="", error_message="", pdf_attachment_name=""):
     """Insert a *whatsapp saudi success log* entry with the enriched schema."""
     try:
         frappe.get_doc({
@@ -169,6 +169,7 @@ def _write_whatsapp_log(title, status, to_number, message="", document_type="",
             "to_number": to_number,
             "message": message,
             "error_message": error_message,
+            "pdf_attachment_name": pdf_attachment_name,
             "time": now(),
         }).insert(ignore_permissions=True)
     except Exception:
@@ -244,35 +245,22 @@ class ERPGulfNotification(Notification):
         return generate_pdf_base64_from_bytes(pdf_bytes)
 
     def upload_file(self, doc, context):
-        pdf_a3_path = embed_file_in_pdf(doc.name, self.print_format, letterhead=None, language="en")
-        if not pdf_a3_path:
-            frappe.throw("Failed to generate PDF/A-3 file!")
+        # Generate PDF using frappe.get_print() – works for any DocType
+        try:
+            memory_url = self.create_pdf(doc)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "WhatsApp Rasayel – PDF generation failed")
+            return {"error": "PDF generation failed"}
 
-        with open(pdf_a3_path.replace(get_url(), frappe.local.site), "rb") as pdf_file:
-            pdf_base64 = base64.b64encode(pdf_file.read()).decode()
-
-        memory_url = f"data:application/pdf;base64,{pdf_base64}"
-        recipients = self.get_receiver_list(doc, context)
-
-        for receipt in recipients:
-            number = receipt
-            phoneNumber = self.get_receiver_phone_number(number)
-            msg1 = frappe.render_template(self.message, context)
-            try:
-                doc1 = frappe.get_doc('Whatsapp Saudi')
-                url = doc1.get('file_upload')
-                token = doc1.get('raseyel_authorization_token')
-
-                uploaded_file = memory_url
-                if not uploaded_file:
-                    return {"error": "No file uploaded"}
-
-
-                return upload_file_common(url, token, memory_url, f"{doc.name}.pdf")
-
-            except Exception:
-                frappe.log_error(frappe.get_traceback(), "File Upload Error")
-                return {"error": "File upload exception"}
+        try:
+            doc1 = frappe.get_doc('Whatsapp Saudi')
+            url = doc1.get('file_upload')
+            token = doc1.get('raseyel_authorization_token')
+            pdf_filename = f"{doc.doctype}-{doc.name}.pdf"
+            return upload_file_common(url, token, memory_url, pdf_filename)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "File Upload Error")
+            return {"error": "File upload exception"}
 
 
     def rasayel_whatsapp_file_message(self, doc, context):
@@ -562,13 +550,14 @@ class ERPGulfNotification(Notification):
 
     def send_bevatel_file_template_message(self, doc, context):
         try:
-            pdf_a3_url = embed_public_file_in_pdf(doc.name, self.print_format, letterhead=None, language="en")
-            if not pdf_a3_url:
-                frappe.throw("Failed to generate PDF/A-3 file!")
-            frappe.log_error(
-                title="url",
-                message=pdf_a3_url
-            )
+            # Use bevatel_create_pdf which works for ANY DocType (not just Sales Invoice)
+            pdf_url = bevatel_create_pdf(doc.doctype, doc.name, self.print_format)
+            if not pdf_url:
+                frappe.log_error(
+                    title="WhatsApp Bevatel – PDF generation failed",
+                    message=f"DocType: {doc.doctype}, Doc: {doc.name}, Print Format: {self.print_format}",
+                )
+                return self.send_bevatel_template_message(doc, context)
 
             ws_doc = frappe.get_single("Whatsapp Saudi")
 
@@ -605,9 +594,9 @@ class ERPGulfNotification(Notification):
 
                     parameters = {
                         "media": {
-                            "link": pdf_a3_url,
+                            "link": pdf_url,
                             "type": "DOCUMENT",
-                            "filename": f"{doc.name}.pdf"
+                            "filename": f"{doc.doctype}-{doc.name}.pdf"
                         }
                     }
 
@@ -652,6 +641,7 @@ class ERPGulfNotification(Notification):
                             message=json.dumps(response_data),
                             document_type=doc.doctype,
                             document_name=doc.name,
+                            pdf_attachment_name=f"{doc.doctype}-{doc.name}.pdf",
                         )
 
                         results.append({
@@ -673,6 +663,7 @@ class ERPGulfNotification(Notification):
                             document_type=doc.doctype,
                             document_name=doc.name,
                             error_message=json.dumps(response_data),
+                            pdf_attachment_name=f"{doc.doctype}-{doc.name}.pdf",
                         )
 
                         results.append({
@@ -838,21 +829,74 @@ class ERPGulfNotification(Notification):
 
     @frappe.whitelist()
     def send_whatsapp_with_pdf(self, doc, context):
-        pdf_a3_path = embed_file_in_pdf(doc.name, self.print_format, letterhead=None, language="en")
-        if not pdf_a3_path:
-            frappe.throw("Failed to generate PDF/A-3 file!")
+        _MAX_PDF_BYTES = 15 * 1024 * 1024  # 15 MB WhatsApp document limit
 
-        with open(pdf_a3_path.replace(get_url(), frappe.local.site), "rb") as pdf_file:
-            pdf_base64 = base64.b64encode(pdf_file.read()).decode()
+        # Generate the PDF using the selected Print Format via frappe.get_print()
+        # This works for ANY DocType, unlike the ZATCA-specific embed_file_in_pdf.
+        try:
+            memory_url = self.create_pdf(doc)
+            _, encoded = memory_url.split(",", 1)
+            pdf_bytes = base64.b64decode(encoded)
+        except Exception:
+            frappe.log_error(frappe.get_traceback(), "WhatsApp PDF generation failed – falling back to text-only")
+            return self.send_whatsapp_without_pdf(doc, context)
 
-        memory_url = f"data:application/pdf;base64,{pdf_base64}"
+        pdf_filename = f"{doc.doctype}-{doc.name}.pdf"
         recipients = self.get_receiver_list(doc, context)
-
         ws_doc = frappe.get_doc('Whatsapp Saudi')
+        msg1 = frappe.render_template(self.message, context)
+
+        # Size guard: PDF exceeds WhatsApp 15 MB limit → send text with download link
+        if len(pdf_bytes) > _MAX_PDF_BYTES:
+            frappe.log_error(
+                title="WhatsApp PDF too large – sending text only",
+                message=(
+                    f"PDF for {doc.doctype} {doc.name} is {len(pdf_bytes)} bytes "
+                    f"(limit {_MAX_PDF_BYTES}). Falling back to text-only message."
+                ),
+            )
+            download_link = frappe.utils.get_url(
+                f"/printview?doctype={doc.doctype}&name={doc.name}"
+                f"&format={self.print_format or ''}&trigger_print=0"
+            )
+            fallback_msg = (
+                msg1 + "\n\nDocument is too large to send via WhatsApp. "
+                f"Download here: {download_link}"
+            )
+            url = ws_doc.get('message_url')
+            instance = ws_doc.get('instance_id')
+            token = ws_doc.get('token')
+            for receipt in recipients:
+                phoneNumber = self.get_receiver_phone_number(receipt)
+                if not phoneNumber:
+                    continue
+                querystring = {
+                    "instanceid": instance,
+                    "token": token,
+                    "phone": phoneNumber,
+                    "body": fallback_msg,
+                }
+                try:
+                    response = requests.get(url, params=querystring, timeout=30)
+                    if response.status_code == 200:
+                        response_dict = json.loads(response.text)
+                        if response_dict.get("sent"):
+                            _write_whatsapp_log(
+                                title="Message sent (PDF too large – text only)",
+                                status="Success",
+                                to_number=phoneNumber,
+                                message=fallback_msg,
+                                document_type=doc.doctype,
+                                document_name=doc.name,
+                                pdf_attachment_name=pdf_filename,
+                            )
+                except requests.exceptions.RequestException:
+                    frappe.log_error(frappe.get_traceback(), "WhatsApp PDF-too-large fallback failed")
+            return
+
         url = ws_doc.get('file_url')
         instance = ws_doc.get('instance_id')
         token = ws_doc.get('token')
-        msg1 = frappe.render_template(self.message, context)
 
         for receipt in recipients:
             number = receipt
@@ -867,7 +911,7 @@ class ERPGulfNotification(Notification):
                 'instanceid': instance,
                 'token': token,
                 'body': memory_url,
-                'filename': f"{doc.name}.pdf",
+                'filename': pdf_filename,
                 'caption': msg1,
                 'phone': phoneNumber
             }
@@ -886,6 +930,7 @@ class ERPGulfNotification(Notification):
                             message=msg1,
                             document_type=doc.doctype,
                             document_name=doc.name,
+                            pdf_attachment_name=pdf_filename,
                         )
                     else:
                         frappe.log_error(
@@ -905,6 +950,7 @@ class ERPGulfNotification(Notification):
                             document_type=doc.doctype,
                             document_name=doc.name,
                             error_message=response_json,
+                            pdf_attachment_name=pdf_filename,
                         )
                 else:
                     frappe.log_error(
@@ -925,6 +971,7 @@ class ERPGulfNotification(Notification):
                         document_type=doc.doctype,
                         document_name=doc.name,
                         error_message=f"HTTP {response.status_code}",
+                        pdf_attachment_name=pdf_filename,
                     )
 
                 return response

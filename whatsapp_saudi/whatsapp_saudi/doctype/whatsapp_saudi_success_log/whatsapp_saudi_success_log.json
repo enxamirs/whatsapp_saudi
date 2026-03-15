@@ -13,6 +13,7 @@
   "document_name",
   "to_number",
   "message",
+  "pdf_attachment_name",
   "time",
   "error_message"
  ],
@@ -47,6 +48,11 @@
    "fieldname": "to_number",
    "fieldtype": "Data",
    "label": "To number"
+  },
+  {
+   "fieldname": "pdf_attachment_name",
+   "fieldtype": "Data",
+   "label": "PDF Attachment Name"
   },
   {
    "fieldname": "time",
